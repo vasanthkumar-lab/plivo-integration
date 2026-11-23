@@ -1,0 +1,24 @@
+{
+  "name": "pivlo-app",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Plivo phone integration demo for a sales CRM",
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -n api,web -c cyan,magenta \"npm:dev:api\" \"npm:dev:web\"",
+    "dev:api": "npm --workspace apps/api run dev",
+    "dev:web": "npm --workspace apps/web run dev",
+    "build": "npm --workspace apps/api run build && npm --workspace apps/web run build",
+    "start": "concurrently -n api,web -c cyan,magenta \"npm --workspace apps/api run start\" \"npm --workspace apps/web run start\"",
+    "plivo:setup": "node apps/api/scripts/setup-plivo.mjs",
+    "clean": "node -e \"const fs=require(\"fs\");[\"apps/web/.next\",\"apps/web/.next-dev\",\"apps/api/dist\"].forEach(d=>fs.rmSync(d,{recursive:true,force:true}));console.log(\"cleaned\")\""
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  },
+  "dependencies": {
+    "plivo": "^4.79.0"
+  }
+}
