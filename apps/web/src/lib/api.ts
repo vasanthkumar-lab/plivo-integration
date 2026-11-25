@@ -1,4 +1,16 @@
-import type { Activity, CallLog, Disposition, Lead, PlivoRuntimeConfig, Rep, WireEntry } from './types';
+import type {
+  Activity,
+  CallLog,
+  Disposition,
+  Lead,
+  PlivoRuntimeConfig,
+  Rep,
+  AnalysisConfig,
+  CallAnalysis,
+  Transcript,
+  TranscriptionConfig,
+  WireEntry,
+} from './types';
 
 /**
  * Where the browser sends API calls.
@@ -43,6 +55,37 @@ export const api = {
   createLead: (lead: { name?: string; company?: string; phone: string; email?: string; value?: number }) =>
     req<Lead>('/api/leads', { method: 'POST', body: JSON.stringify(lead) }),
   wireLog: () => req<WireEntry[]>('/api/events/wire'),
+
+  transcriptionConfig: () => req<TranscriptionConfig>('/api/transcription/config'),
+
+  analysisConfig: () => req<AnalysisConfig>('/api/analysis/config'),
+  analysis: (callUuid: string) =>
+    req<CallAnalysis>(`/api/calls/${encodeURIComponent(callUuid)}/analysis`),
+  requestAnalysis: (callUuid: string, force = false) =>
+    req<{ ok: boolean; status?: string; analysis: CallAnalysis | null; error?: string }>(
+      `/api/calls/${encodeURIComponent(callUuid)}/analysis${force ? '?force=true' : ''}`,
+      { method: 'POST' },
+    ),
+  transcript: (callUuid: string) =>
+    req<Transcript>(`/api/calls/${encodeURIComponent(callUuid)}/transcript`),
+  /** Transcribe on demand -- for an old recording, or after a failure. */
+  requestTranscript: (callUuid: string, force = false, language?: string) => {
+    const q = new URLSearchParams();
+    if (force) q.set('force', 'true');
+    if (language) q.set('language', language);
+    const qs = q.toString();
+    return req<{ ok: boolean; transcript: Transcript | null; error?: string }>(
+      `/api/calls/${encodeURIComponent(callUuid)}/transcript${qs ? `?${qs}` : ''}`,
+      { method: 'POST' },
+    );
+  },
+
+  /** Removes the call, its transcript, its AI verdict and the Plivo audio. */
+  deleteCall: (callUuid: string) =>
+    req<{ ok: boolean; callUuid: string; audioDeleted: boolean }>(
+      `/api/calls/${encodeURIComponent(callUuid)}`,
+      { method: 'DELETE' },
+    ),
 
   /** Push a browser-side SDK event into the Inspector. Never throws. */
   clientEvent: (label: string, detail?: string, body?: any) =>

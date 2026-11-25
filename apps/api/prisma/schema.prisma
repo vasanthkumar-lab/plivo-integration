@@ -1,0 +1,117 @@
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+/// A contact in the pipeline. Created by hand, or automatically from the first
+/// call to or from a number.
+model Lead {
+  id              String    @id
+  name            String    @default("")
+  company         String    @default("")
+  phone           String    @default("")
+  email           String    @default("")
+  stage           String    @default("new")
+  value           Decimal   @default(0) @db.Decimal
+  ownerId         String?   @map("owner_id")
+  lastContactedAt DateTime? @map("last_contacted_at") @db.Timestamptz(6)
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([ownerId], map: "leads_owner_idx")
+  @@index([phone], map: "leads_phone_idx")
+  @@map("leads")
+}
+
+/// One call leg as Plivo reported it, including who hung up and why.
+///
+/// Deliberately NOT a foreign key to Lead: a call row is evidence that a real
+/// conversation happened, and must never be rejected because its contact row
+/// has not been written yet.
+model Call {
+  id               String    @id
+  callUuid         String    @unique @map("call_uuid")
+  leadId           String?   @map("lead_id")
+  repId            String?   @map("rep_id")
+  direction        String
+  from             String    @default("") @map("from_number")
+  to               String    @default("") @map("to_number")
+  status           String    @default("completed")
+  startedAt        DateTime  @map("started_at") @db.Timestamptz(6)
+  endedAt          DateTime? @map("ended_at") @db.Timestamptz(6)
+  durationSec      Int       @default(0) @map("duration_sec")
+  recordingUrl     String?   @map("recording_url")
+  disposition      String?
+  notes            String?
+  endedBy          String?   @map("ended_by")
+  endReason        String?   @map("end_reason")
+  transcriptStatus String    @default("none") @map("transcript_status")
+  analysisStatus   String    @default("none") @map("analysis_status")
+
+  @@index([leadId], map: "calls_lead_idx")
+  @@index([startedAt(sort: Desc)], map: "calls_started_idx")
+  @@map("calls")
+}
+
+/// The follow-up timeline against a contact: call outcomes, dispositions,
+/// notes and system events.
+model Activity {
+  id     String   @id
+  leadId String   @map("lead_id")
+  type   String
+  title  String
+  body   String?
+  at     DateTime @db.Timestamptz(6)
+  meta   Json?
+
+  @@index([leadId, at(sort: Desc)], map: "activities_lead_idx")
+  @@map("activities")
+}
+
+/// A Deepgram transcript, one row per call.
+///
+/// `segments` is JSON because a transcript is always read whole; `text` is kept
+/// flat so conversations can be searched. The GIN full-text index on `text`
+/// lives in migrations/, since Prisma cannot model an expression index.
+model Transcript {
+  callUuid         String   @id @map("call_uuid")
+  status           String   @default("none")
+  provider         String   @default("deepgram")
+  model            String?
+  language         String?
+  channels         Int      @default(0)
+  rolesAreReliable Boolean  @default(false) @map("roles_are_reliable")
+  durationSec      Decimal  @default(0) @map("duration_sec") @db.Decimal
+  text             String   @default("")
+  segments         Json     @default("[]")
+  createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  error            String?
+
+  @@map("transcripts")
+}
+
+/// What Gemini made of the conversation: did this lead convert, and why.
+/// One row per call, replaced whenever the analysis is re-run.
+model CallAnalysis {
+  callUuid   String   @id @map("call_uuid")
+  status     String   @default("none")
+  provider   String   @default("gemini")
+  model      String?
+  /// converted | promising | follow_up | not_interested | unclear
+  outcome    String?
+  converted  Boolean  @default(false)
+  confidence Decimal  @default(0) @db.Decimal
+  summary    String   @default("")
+  /// Quotes and moments that justify the verdict, so a rep can check its work.
+  signals    Json     @default("[]")
+  objections Json     @default("[]")
+  nextSteps  Json     @default("[]") @map("next_steps")
+  sentiment  String?
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  error      String?
+
+  @@map("call_analyses")
+}

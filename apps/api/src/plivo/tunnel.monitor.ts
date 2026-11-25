@@ -12,19 +12,7 @@ const FIRST_PROBE_DELAY_MS = 2_000;
 /** What GET /plivo/health must say for us to believe we reached *this* server. */
 export const HEALTH_MARKER = 'pivlo-api';
 
-/**
- * Watches the public tunnel.
- *
- * `publiclyReachable` on PlivoConfig only checks that PUBLIC_BASE_URL is not a
- * localhost/private address -- it cannot tell a live tunnel from a dead one.
- * When ngrok stops, Plivo gets "Error Reaching Answer URL" (7011) and kills the
- * call, which the Browser SDK reports to the rep as the cause "Busy". That is a
- * thoroughly misleading message for "your tunnel is down", so probe for it and
- * say so plainly instead.
- *
- * The probe goes out to the public URL and comes back in through the tunnel to
- * this same process, so it exercises exactly the path Plivo uses.
- */
+
 @Injectable()
 export class TunnelMonitor implements OnModuleInit, OnApplicationShutdown {
   private readonly log = new Logger('TunnelMonitor');

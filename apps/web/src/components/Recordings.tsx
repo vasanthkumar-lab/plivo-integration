@@ -1,17 +1,44 @@
 'use client';
 
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { API_BASE } from '@/lib/api';
-import type { CallLog, Lead } from '@/lib/types';
+import type { CallLog, Lead, Transcript as TranscriptData } from '@/lib/types';
 import { fmtDuration, fmtTime } from './ui';
+import { Transcript } from './Transcript';
 
 /**
  * Call recordings. Audio is streamed through our own API rather than straight
  * from Plivo's media host, because those URLs need account credentials that
  * must not reach the browser.
  */
-export function Recordings({ recordings, leads }: { recordings: CallLog[]; leads: Lead[] }) {
+export function Recordings({
+  recordings,
+  leads,
+  repName,
+  transcripts,
+  transcribing,
+  onOpen,
+  onTranscribe,
+}: {
+  recordings: CallLog[];
+  leads: Lead[];
+  repName: string;
+  transcripts: Record<string, TranscriptData>;
+  transcribing: Record<string, boolean>;
+  /** Called when a row is expanded, so its transcript can be fetched lazily. */
+  onOpen: (callUuid: string) => void;
+  onTranscribe: (callUuid: string, force?: boolean) => void;
+}) {
   const [playing, setPlaying] = useState<string | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  /** Clicking a transcript timestamp moves the player to that moment. */
+  const seek = (seconds: number) => {
+    const el = audioRef.current;
+    if (!el) return;
+    el.currentTime = seconds;
+    void el.play().catch(() => undefined);
+  };
 
   return (
     <section className="panel overflow-hidden">
@@ -57,8 +84,17 @@ export function Recordings({ recordings, leads }: { recordings: CallLog[]; leads
                         {c.disposition.replace('_', ' ')}
                       </span>
                     )}
+                    {c.transcriptStatus === 'ready' && (
+                      <span className="rounded-full bg-[var(--panel-2)] px-2 py-1 text-[10px] font-semibold text-[var(--muted)]">
+                        transcript
+                      </span>
+                    )}
                     <button
-                      onClick={() => setPlaying(isOpen ? null : c.callUuid)}
+                      onClick={() => {
+                        const next = isOpen ? null : c.callUuid;
+                        setPlaying(next);
+                        if (next) onOpen(next);
+                      }}
                       className="rounded-lg border border-[var(--line)] px-3 py-1.5 text-[12px] font-semibold transition hover:border-[var(--accent)] hover:text-[var(--accent)]"
                     >
                       {isOpen ? 'Close' : '▶ Play'}
@@ -67,8 +103,9 @@ export function Recordings({ recordings, leads }: { recordings: CallLog[]; leads
                 </div>
 
                 {isOpen && (
-                  <div className="slide-up mt-2.5 flex flex-col gap-1.5">
+                  <div className="slide-up mt-2.5 flex flex-col gap-2">
                     <audio
+                      ref={audioRef}
                       controls
                       autoPlay
                       preload="none"
@@ -77,6 +114,19 @@ export function Recordings({ recordings, leads }: { recordings: CallLog[]; leads
                     >
                       Your browser cannot play this audio.
                     </audio>
+
+                    <Transcript
+                      transcript={transcripts[c.callUuid] ?? null}
+                      call={c}
+                      lead={lead ?? null}
+                      repName={repName}
+                      onSeek={seek}
+                      busy={Boolean(transcribing[c.callUuid])}
+                      onRetry={() =>
+                        onTranscribe(c.callUuid, c.transcriptStatus === 'failed')
+                      }
+                    />
+
                     <span className="mono truncate text-[10px] text-[var(--muted)]">
                       {c.recordingUrl}
                     </span>

@@ -51,6 +51,85 @@ export interface CallLog {
   endedBy: EndedBy | null;
   /** Plivo's own words, e.g. "Normal Hangup" / "ORIGINATOR_CANCEL". Kept for the Inspector. */
   endReason: string | null;
+  /** Where this call's Deepgram transcript has got to. */
+  transcriptStatus: 'none' | 'pending' | 'ready' | 'failed';
+  /** Where Gemini's verdict on the conversation has got to. */
+  analysisStatus: 'none' | 'pending' | 'ready' | 'failed';
+}
+
+export type SpeakerRole = 'rep' | 'customer' | 'unknown';
+
+export interface TranscriptSegment {
+  start: number;
+  end: number;
+  speaker: number;
+  role: SpeakerRole;
+  text: string;
+  confidence: number;
+}
+
+export interface Transcript {
+  callUuid: string;
+  status: 'none' | 'pending' | 'ready' | 'failed';
+  provider: 'deepgram';
+  model: string;
+  language: string;
+  channels: number;
+  /** False when the audio was mono and speakers came from voice diarization. */
+  rolesAreReliable: boolean;
+  durationSec: number;
+  text: string;
+  segments: TranscriptSegment[];
+  createdAt: string | null;
+  error: string | null;
+}
+
+export interface TranscriptionLanguage {
+  code: string;
+  label: string;
+}
+
+export interface TranscriptionConfig {
+  enabled: boolean;
+  model: string;
+  language: string;
+  languages: TranscriptionLanguage[];
+  autoTranscribe: boolean;
+  keyMasked: string | null;
+  blockers: string[];
+}
+
+export type CallOutcomeVerdict =
+  | 'converted'
+  | 'promising'
+  | 'follow_up'
+  | 'not_interested'
+  | 'unclear';
+
+export interface CallAnalysis {
+  callUuid: string;
+  status: 'none' | 'pending' | 'ready' | 'failed';
+  provider: 'gemini';
+  model: string;
+  outcome: CallOutcomeVerdict | null;
+  converted: boolean;
+  /** 0-1, the model's own certainty. */
+  confidence: number;
+  summary: string;
+  signals: string[];
+  objections: string[];
+  nextSteps: string[];
+  sentiment: 'positive' | 'neutral' | 'negative' | null;
+  createdAt: string | null;
+  error: string | null;
+}
+
+export interface AnalysisConfig {
+  enabled: boolean;
+  model: string;
+  autoAnalyse: boolean;
+  keyMasked: string | null;
+  blockers: string[];
 }
 
 export interface Activity {

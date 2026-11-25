@@ -10,6 +10,7 @@ import type { NestExpressApplication } from '@nestjs/platform-express';
 import { AppModule } from './app.module';
 import { PlivoConfig } from './plivo/plivo.config';
 import { PlivoService } from './plivo/plivo.service';
+import { DeepgramConfig } from './transcription/deepgram.config';
 
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, { rawBody: true });
@@ -33,6 +34,7 @@ async function bootstrap() {
   log.log(`Answer URL: ${config.describe().answerUrl}`);
   log.log(`Hangup URL: ${config.describe().hangupUrl}`);
   config.reportReadiness();
+  app.get(DeepgramConfig).report();
 
   // Pull anything Plivo holds that we do not, before the first browser asks.
   // Otherwise the dashboard renders an empty pipeline and fills in late.
@@ -42,3 +44,16 @@ async function bootstrap() {
     .catch((err) => log.warn(`startup recording sync failed: ${err.message}`));
 }
 bootstrap();
+
+
+
+
+
+
+
+
+
+
+
+
+

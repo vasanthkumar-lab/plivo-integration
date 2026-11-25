@@ -8,6 +8,8 @@ export type ServerEvent =
   | { type: 'call-ended'; payload: any }
   | { type: 'crm-updated'; payload: any }
   | { type: 'plivo-config'; payload: any }
+  | { type: 'transcript-ready'; payload: any }
+  | { type: 'analysis-ready'; payload: any }
   | { type: 'wire'; payload: WireEntry };
 
 /** One line in the Integration Inspector: a real request/response on the Plivo boundary. */

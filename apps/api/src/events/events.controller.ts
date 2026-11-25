@@ -20,11 +20,6 @@ export class EventsController {
     return this.events.getWireLog();
   }
 
-  /**
-   * The browser reports Plivo SDK events here so they appear in the Inspector.
-   * Without this, anything the SDK does (login, registration, incoming INVITE)
-   * is invisible to the server and can only be seen in the browser console.
-   */
   @Post('client')
   @HttpCode(200)
   client(@Body() body: { label: string; detail?: string; body?: any; kind?: 'http' | 'xml' | 'sdk' | 'note' }) {

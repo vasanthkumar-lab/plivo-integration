@@ -1,9 +1,10 @@
-import { Injectable, Logger, OnApplicationShutdown } from '@nestjs/common';
+import { Injectable, Logger, OnApplicationShutdown, OnModuleInit } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs';
 import { dirname, resolve } from 'path';
 import { Activity, CallLog, Disposition, EndedBy, Lead, Rep } from './crm.types';
 import { describeOutcome } from './call-outcome';
+import { CrmRepository } from './crm.repository';
 
 /** What gets written to disk. Rep presence is runtime state and stays out. */
 interface CrmSnapshot {
@@ -25,7 +26,7 @@ interface CrmSnapshot {
  * like they had never happened.
  */
 @Injectable()
-export class CrmService implements OnApplicationShutdown {
+export class CrmService implements OnApplicationShutdown, OnModuleInit {
   private readonly log = new Logger('CRM');
 
   private reps: Rep[] = [
@@ -52,9 +53,78 @@ export class CrmService implements OnApplicationShutdown {
 
   private saveTimer: NodeJS.Timeout | null = null;
 
-  constructor() {
+  /** True once Postgres is the store; the JSON file is then left untouched. */
+  private usingDb = false;
+
+  /**
+   * Resolves once the working set is final -- restored from disk and, if a
+   * database is configured, replaced by what it holds.
+   *
+   * Anything that adjusts call rows at boot must await this. Nest's hook
+   * ordering is an implementation detail, and a write made before the swap is
+   * silently thrown away with the array it was made on.
+   */
+  private markLoaded!: () => void;
+  private readonly loaded = new Promise<void>((resolve) => {
+    this.markLoaded = resolve;
+  });
+
+  whenLoaded(): Promise<void> {
+    return this.loaded;
+  }
+
+  constructor(private readonly repo: CrmRepository) {
     this.applyRealEndpoints();
+    // Postgres is not connected yet at construction time, so the JSON store
+    // loads first and onModuleInit swaps in the database when it is ready.
     this.restore();
+  }
+
+  /**
+   * Postgres becomes the source of truth once it is up.
+   *
+   * On an empty database the JSON store that just loaded is imported, so an
+   * existing pipeline survives the move rather than starting over.
+   */
+  async onModuleInit() {
+    try {
+      const live = await this.repo.ensureReady();
+      if (!live) return;
+
+      if (await this.repo.isEmpty()) {
+        if (this.leads.length || this.calls.length) {
+          await this.repo.importSnapshot({
+            leads: this.leads,
+            calls: this.calls,
+            activities: this.activities,
+          });
+        }
+      } else {
+        const data = await this.repo.loadAll();
+        this.leads = data.leads;
+        this.calls = data.calls;
+        this.activities = data.activities;
+        this.leadSeq = Math.max(
+          1000,
+          // Strip NON-digits: /D/ (without the backslash) matches a literal "D",
+        // leaves "L-1001" intact, yields NaN, and the next contact silently
+        // reuses an id that already exists.
+        ...this.leads.map((l) => Number(String(l.id).replace(/\D/g, '')) || 0),
+        );
+      }
+      this.usingDb = true;
+      this.log.log(
+        `Postgres is the store: ${this.leads.length} contacts, ${this.calls.length} calls, ` +
+          `${this.activities.length} activities`,
+      );
+    } catch (err) {
+      this.log.error(
+        `Postgres load failed: ${(err as Error).message}. Staying on the JSON store.`,
+      );
+    } finally {
+      // Resolves on every path, including the early return, so nothing hangs.
+      this.markLoaded();
+    }
   }
 
   onApplicationShutdown() {
@@ -73,13 +143,21 @@ export class CrmService implements OnApplicationShutdown {
     try {
       const raw = JSON.parse(readFileSync(this.storeFile, 'utf8')) as Partial<CrmSnapshot>;
       this.leads = raw.leads ?? [];
-      this.calls = raw.calls ?? [];
+      this.calls = (raw.calls ?? []).map((c) => ({
+        // Stores written before these features existed have no such fields.
+        transcriptStatus: 'none' as const,
+        analysisStatus: 'none' as const,
+        ...c,
+      }));
       this.activities = raw.activities ?? [];
       // Never re-issue an id that a restored lead already holds.
       this.leadSeq = Math.max(
         raw.leadSeq ?? 1000,
         1000,
-        ...this.leads.map((l) => Number(String(l.id).replace(/D/g, '')) || 0),
+        // Strip NON-digits: /D/ (without the backslash) matches a literal "D",
+        // leaves "L-1001" intact, yields NaN, and the next contact silently
+        // reuses an id that already exists.
+        ...this.leads.map((l) => Number(String(l.id).replace(/\D/g, '')) || 0),
       );
       this.log.log(
         `CRM restored: ${this.leads.length} contacts, ${this.calls.length} calls, ` +
@@ -92,8 +170,23 @@ export class CrmService implements OnApplicationShutdown {
     }
   }
 
-  /** Queue a write. Debounced: one call mutates several records in a burst. */
-  private persist() {
+  /**
+   * Write a change through to storage.
+   *
+   * With Postgres up, only the rows that changed are written, immediately --
+   * losing a call because a debounce timer had not fired yet is not a trade
+   * worth making. Without it, the whole snapshot is still debounced to the
+   * JSON file as before.
+   */
+  private persist(changed: {
+    lead?: Lead | null;
+    call?: CallLog | null;
+    activity?: Activity | null;
+  } = {}) {
+    if (this.usingDb) {
+      void this.writeThrough(changed);
+      return;
+    }
     if (this.saveTimer) return;
     this.saveTimer = setTimeout(() => {
       this.saveTimer = null;
@@ -102,8 +195,34 @@ export class CrmService implements OnApplicationShutdown {
     this.saveTimer.unref?.();
   }
 
+  /**
+   * Leads are written before calls and activities so a row always lands after
+   * the contact it points at. A failure here is logged rather than thrown: the
+   * in-memory copy is still correct and the caller is usually a Plivo webhook
+   * that must answer promptly.
+   */
+  private async writeThrough(changed: {
+    lead?: Lead | null;
+    call?: CallLog | null;
+    activity?: Activity | null;
+  }) {
+    try {
+      if (changed.lead) await this.repo.saveLead(changed.lead);
+      if (changed.call) await this.repo.saveCall(changed.call);
+      if (changed.activity) {
+        // An activity always belongs to a contact; make sure it exists first.
+        const owner = this.getLead(changed.activity.leadId);
+        if (owner) await this.repo.saveLead(owner);
+        await this.repo.saveActivity(changed.activity);
+      }
+    } catch (err) {
+      this.log.error(`Postgres write failed: ${(err as Error).message}`);
+    }
+  }
+
   /** Write via a temp file + rename, so a crash mid-write cannot truncate the store. */
   private flush() {
+    if (this.usingDb) return;
     const snapshot: CrmSnapshot = {
       version: 1,
       savedAt: new Date().toISOString(),
@@ -202,7 +321,7 @@ export class CrmService implements OnApplicationShutdown {
     this.leads.push(lead);
     this.addActivity({ leadId: lead.id, type: 'system', title: 'Contact created' });
     this.log.log(`lead created ${lead.id} ${lead.phone}`);
-    this.persist();
+    this.persist({ lead });
     return lead;
   }
 
@@ -254,7 +373,7 @@ export class CrmService implements OnApplicationShutdown {
       });
     }
     this.log.log(`recording attached to ${callUuid}`);
-    this.persist();
+    this.persist({ call });
     return call;
   }
 
@@ -267,7 +386,52 @@ export class CrmService implements OnApplicationShutdown {
     if (!call) return null;
     if (endedBy) call.endedBy = endedBy;
     if (endReason) call.endReason = endReason;
-    this.persist();
+    this.persist({ call });
+    return call;
+  }
+
+  /**
+   * Forget a call: the log entry, its transcript, its AI verdict and the
+   * timeline entries it produced. Returns the call that was removed, or null.
+   */
+  async deleteCall(callUuid: string): Promise<CallLog | null> {
+    const call = this.getCallByUuid(callUuid);
+    if (!call) return null;
+
+    this.calls = this.calls.filter((c) => c.callUuid !== callUuid);
+    this.activities = this.activities.filter(
+      (a) => (a.meta as { callUuid?: string } | undefined)?.callUuid !== callUuid,
+    );
+
+    if (this.usingDb) {
+      try {
+        await this.repo.deleteCall(callUuid);
+      } catch (err) {
+        this.log.error(`could not delete call ${callUuid}: ${(err as Error).message}`);
+      }
+    } else {
+      this.flush();
+    }
+
+    this.log.log(`call deleted ${callUuid}`);
+    return call;
+  }
+
+  /** Move a call's transcript through none -> pending -> ready / failed. */
+  setTranscriptStatus(callUuid: string, status: CallLog['transcriptStatus']) {
+    const call = this.getCallByUuid(callUuid);
+    if (!call || call.transcriptStatus === status) return call;
+    call.transcriptStatus = status;
+    this.persist({ call });
+    return call;
+  }
+
+  /** Move a call's AI analysis through none -> pending -> ready / failed. */
+  setAnalysisStatus(callUuid: string, status: CallLog['analysisStatus']) {
+    const call = this.getCallByUuid(callUuid);
+    if (!call || call.analysisStatus === status) return call;
+    call.analysisStatus = status;
+    this.persist({ call });
     return call;
   }
 
@@ -319,10 +483,13 @@ export class CrmService implements OnApplicationShutdown {
       notes: null,
       endedBy: null,
       endReason: null,
+      transcriptStatus: 'none',
+      analysisStatus: 'none',
     };
     this.calls.push(call);
     this.log.log(`call start ${call.callUuid} ${call.direction} ${call.from} -> ${call.to}`);
-    this.persist();
+    // The contact may have just been created inside this method.
+    this.persist({ call, lead: leadId ? this.getLead(leadId) : null });
     return call;
   }
 
@@ -380,7 +547,7 @@ export class CrmService implements OnApplicationShutdown {
         },
       });
     }
-    this.persist();
+    this.persist({ call, lead: call.leadId ? this.getLead(call.leadId) : null });
     return call;
   }
 
@@ -405,7 +572,7 @@ export class CrmService implements OnApplicationShutdown {
         meta: { callUuid },
       });
     }
-    this.persist();
+    this.persist({ call, lead: call.leadId ? this.getLead(call.leadId) : null });
     return call;
   }
 
@@ -420,7 +587,7 @@ export class CrmService implements OnApplicationShutdown {
       meta: input.meta,
     };
     this.activities.push(activity);
-    this.persist();
+    this.persist({ activity });
     return activity;
   }
 

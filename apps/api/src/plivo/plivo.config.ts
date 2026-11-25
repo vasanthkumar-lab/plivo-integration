@@ -8,10 +8,6 @@ export interface TunnelStatus {
   detail: string | null;
 }
 
-/**
- * Credentials live here and nowhere else. The browser never sees the Auth Token --
- * it only ever receives a short-lived JWT from /api/plivo/token.
- */
 @Injectable()
 export class PlivoConfig {
   private readonly log = new Logger('PlivoConfig');
@@ -29,6 +25,19 @@ export class PlivoConfig {
    * than a minute. Plivo allows up to 24 hours; two hours is a sane ceiling.
    */
   readonly recordMaxSeconds = Number(process.env.PLIVO_RECORD_MAX_SECONDS || 7200);
+
+  /**
+   * 'stereo' puts each leg on its own audio channel, which lets Deepgram label
+   * speakers from the channel split instead of guessing by voice.
+   *
+   * Plivo's parameter is record_channel_type and it accepts only "mono" or
+   * "stereo" -- and it ignores anything else WITHOUT an error, so a wrong value
+   * here silently produces mono recordings. Legacy "dual" is mapped through.
+   */
+  get recordChannels(): 'mono' | 'stereo' {
+    const raw = (process.env.PLIVO_RECORD_CHANNELS || 'stereo').trim().toLowerCase();
+    return raw === 'mono' ? 'mono' : 'stereo';
+  }
 
   /** Plivo Application the endpoints are linked to. Optional, but Plivo recommends it. */
   readonly appId = (process.env.PLIVO_APP_ID || '').trim();

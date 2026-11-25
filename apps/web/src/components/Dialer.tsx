@@ -91,12 +91,30 @@ export function Dialer({
   };
 
   return (
-    <section className="panel px-4 py-3">
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="shrink-0 text-[11px] font-semibold tracking-wide text-[var(--muted)] uppercase">
+    /* A vertical stack, not a wrapping row: this panel lives in a ~320px rail,
+       where a single flex line pushed the Call button onto its own ragged row. */
+    <section className="panel p-4">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <h2 className="text-[11px] font-semibold tracking-wide text-[var(--muted)] uppercase">
           Quick dial
-        </span>
+        </h2>
+        <button
+          onClick={() => setPadOpen((o) => !o)}
+          aria-expanded={padOpen}
+          aria-label={padOpen ? 'Hide keypad' : 'Show keypad'}
+          title={padOpen ? 'Hide keypad' : 'Show keypad'}
+          className={`rounded-lg border px-2 py-1 text-[12px] transition ${
+            padOpen
+              ? 'border-[var(--accent)] bg-[var(--accent)]/8 text-[var(--accent)]'
+              : 'border-[var(--line)] text-[var(--muted)] hover:text-[var(--text)]'
+          }`}
+        >
+          ⌨
+        </button>
+      </div>
 
+      {/* Backspace sits inside the field so the input can use the full width. */}
+      <div className="relative">
         <input
           value={value}
           onChange={(e) => setValue(e.target.value)}
@@ -104,60 +122,54 @@ export function Dialer({
           inputMode="tel"
           placeholder="+91 98765 43210"
           aria-label="Phone number to dial"
-          className="mono w-[190px] min-w-0 flex-1 rounded-lg border border-[var(--line)] bg-[var(--panel-2)] px-2.5 py-1.5 text-[13px] outline-none placeholder:text-[var(--muted)]/60 focus:border-[var(--accent)]"
+          className="mono w-full rounded-xl border border-[var(--line)] bg-[var(--panel-2)] py-2.5 pr-10 pl-3 text-[14px] outline-none placeholder:text-[var(--muted)]/60 focus:border-[var(--accent)]"
         />
+        {value && (
+          <button
+            onClick={() => setValue((v) => v.slice(0, -1))}
+            aria-label="Delete last digit"
+            className="absolute top-1/2 right-2 -translate-y-1/2 rounded-md px-1.5 py-1 text-[13px] text-[var(--muted)] transition hover:text-[var(--text)]"
+          >
+            ⌫
+          </button>
+        )}
+      </div>
 
-        <button
-          onClick={() => setValue((v) => v.slice(0, -1))}
-          disabled={!value}
-          aria-label="Delete last digit"
-          className="rounded-lg border border-[var(--line)] px-2 py-1.5 text-[12px] text-[var(--muted)] transition enabled:hover:text-[var(--text)] disabled:opacity-30"
-        >
-          ⌫
-        </button>
-
-        <button
-          onClick={() => setPadOpen((o) => !o)}
-          aria-expanded={padOpen}
-          className="rounded-lg border border-[var(--line)] px-2 py-1.5 text-[12px] text-[var(--muted)] transition hover:text-[var(--text)]"
-          title="Show keypad"
-        >
-          ⌨
-        </button>
-
-        <button
-          onClick={submit}
-          disabled={!canCall || !valid}
-          title={
-            !canCall
-              ? 'Register the phone first'
-              : !valid
-                ? `Enter ${nationalLength} digits, or a full number with country code`
-                : `Call ${dialled}`
-          }
-          className="flex shrink-0 items-center gap-1.5 rounded-lg bg-[var(--accent)] px-4 py-1.5 text-[13px] font-bold text-white transition enabled:hover:brightness-110 disabled:cursor-not-allowed disabled:bg-[var(--panel-2)] disabled:text-[var(--muted)]"
-        >
-          <span>📞</span> Call
-        </button>
-
+      {/* Reserve the line so the Call button does not jump as you type. */}
+      <div className="mt-1.5 min-h-[16px] px-0.5 text-[11px]">
         {dialled &&
           (valid ? (
-            <span className="text-[11px] text-[var(--muted)]">
+            <span className="text-[var(--muted)]">
               → <span className="mono font-semibold text-[var(--accent)]">{dialled}</span>
               {addedPrefix && <span> · +{countryCode} added</span>}
             </span>
           ) : (
-            <span className="text-[11px] text-[var(--warn)]">{hint}</span>
+            <span className="text-[var(--warn)]">{hint}</span>
           ))}
       </div>
 
+      <button
+        onClick={submit}
+        disabled={!canCall || !valid}
+        title={
+          !canCall
+            ? 'Register the phone first'
+            : !valid
+              ? `Enter ${nationalLength} digits, or a full number with country code`
+              : `Call ${dialled}`
+        }
+        className="mt-2 flex w-full items-center justify-center gap-2 rounded-xl bg-[var(--accent)] py-2.5 text-[14px] font-bold text-white transition enabled:hover:brightness-110 disabled:cursor-not-allowed disabled:bg-[var(--panel-2)] disabled:text-[var(--muted)]"
+      >
+        <span aria-hidden="true">📞</span> Call
+      </button>
+
       {padOpen && (
-        <div className="slide-up mt-3 grid w-[220px] grid-cols-3 gap-1.5">
+        <div className="slide-up mt-3 grid w-full grid-cols-3 gap-1.5">
           {KEYS.map((k) => (
             <button
               key={k}
               onClick={() => setValue((v) => v + k)}
-              className="mono rounded-lg border border-[var(--line)] bg-[var(--panel-2)] py-2 text-[15px] font-semibold transition hover:border-[var(--accent)] hover:text-[var(--accent)]"
+              className="mono rounded-xl border border-[var(--line)] bg-[var(--panel-2)] py-2.5 text-[15px] font-semibold transition hover:border-[var(--accent)] hover:text-[var(--accent)]"
             >
               {k}
             </button>

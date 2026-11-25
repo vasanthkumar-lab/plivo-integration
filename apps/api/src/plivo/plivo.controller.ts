@@ -107,22 +107,39 @@ export class PlivoController {
   @Post('plivo/recording')
   @HttpCode(200)
   recording(@Body() body: Record<string, any>) {
-    const callUuid = String(body.CallUUID ?? body.call_uuid ?? '');
-    const url = String(body.RecordUrl ?? body.record_url ?? body.RecordingUrl ?? '');
-    const duration = Number(body.RecordingDuration ?? body.recording_duration ?? body.Duration ?? 0);
+    /**
+     * Plivo is inconsistent about the casing here between the XML webhooks and
+     * the Record API callback, so match on shape rather than on an exact list
+     * of names. The old fixed list silently matched nothing, which left the
+     * recording unattached until the next poll of the Recordings API.
+     */
+    const pick = (test: RegExp): string => {
+      const key = Object.keys(body).find((k) => test.test(k) && String(body[k] ?? '').trim());
+      return key ? String(body[key]).trim() : '';
+    };
+
+    const callUuid = pick(/^call_?uuid$/i) || pick(/call_?uuid/i);
+    const url = pick(/record(ing)?_?url/i);
+    const duration = Number(
+      body.RecordingDuration ?? body.recording_duration ?? body.Duration ?? 0,
+    );
 
     this.events.wire({
       actor: 'plivo',
       kind: 'http',
       label: 'POST /plivo/recording',
-      detail: 'recording ready',
-      body: { CallUUID: callUuid, RecordUrl: url, RecordingDuration: duration },
+      // Log what actually arrived, not what we made of it: the previous version
+      // logged its own (empty) interpretation and hid the mismatch.
+      detail: url ? 'recording ready' : 'recording callback had no usable URL',
+      body,
     });
 
     if (!callUuid || !url) return { ok: false };
 
     const call = this.crm.attachRecording(callUuid, url, duration);
     if (call) {
+      // Audio exists now, so the transcript can start. Does not block the 200.
+      this.plivo.queueTranscription(callUuid);
       this.events.wire({
         actor: 'backend',
         kind: 'note',

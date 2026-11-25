@@ -12,6 +12,10 @@ import type {
   PhoneState,
   PlivoRuntimeConfig,
   Rep,
+  AnalysisConfig,
+  CallAnalysis,
+  Transcript,
+  TranscriptionConfig,
   WireEntry,
 } from './types';
 
@@ -66,6 +70,12 @@ export function useSoftphone() {
   const [muted, setMuted] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [recordings, setRecordings] = useState<CallLog[]>([]);
+  const [transcripts, setTranscripts] = useState<Record<string, Transcript>>({});
+  const [transcribing, setTranscribing] = useState<Record<string, boolean>>({});
+  const [transcription, setTranscription] = useState<TranscriptionConfig | null>(null);
+  const [analyses, setAnalyses] = useState<Record<string, CallAnalysis>>({});
+  const [analysing, setAnalysing] = useState<Record<string, boolean>>({});
+  const [analysisConfig, setAnalysisConfig] = useState<AnalysisConfig | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
 
   const pushToast = useCallback((kind: Toast['kind'], title: string, body?: string) => {
@@ -86,6 +96,8 @@ export function useSoftphone() {
   phoneRef.current = phone;
   const leadsRef = useRef<Lead[]>(leads);
   leadsRef.current = leads;
+  const callsRef = useRef<CallLog[]>(calls);
+  callsRef.current = calls;
   const elapsedRef = useRef(elapsed);
   elapsedRef.current = elapsed;
   const plivoRef = useRef<any>(null);
@@ -108,6 +120,82 @@ export function useSoftphone() {
     }
   }, []);
 
+  /** Fetch one transcript on demand -- the list view does not need them all. */
+  const loadTranscript = useCallback(async (callUuid: string) => {
+    try {
+      const t = await api.transcript(callUuid);
+      setTranscripts((prev) => ({ ...prev, [callUuid]: t }));
+      return t;
+    } catch {
+      return null;
+    }
+  }, []);
+
+  /** Ask the server to transcribe (or re-transcribe) a recording. */
+  const requestTranscript = useCallback(
+    async (callUuid: string, force = false, language?: string) => {
+      setTranscribing((prev) => ({ ...prev, [callUuid]: true }));
+      try {
+        const res = await api.requestTranscript(callUuid, force, language);
+        if (res.transcript) {
+          setTranscripts((prev) => ({ ...prev, [callUuid]: res.transcript as Transcript }));
+        }
+        if (!res.ok && res.error) pushToast('error', 'Could not transcribe', res.error);
+      } catch (e: any) {
+        pushToast('error', 'Could not transcribe', e?.message ?? 'Request failed');
+      } finally {
+        setTranscribing((prev) => ({ ...prev, [callUuid]: false }));
+      }
+    },
+    [pushToast],
+  );
+
+  /** Fetch one call's AI verdict on demand. */
+  const loadAnalysis = useCallback(async (callUuid: string) => {
+    try {
+      const a = await api.analysis(callUuid);
+      setAnalyses((prev) => ({ ...prev, [callUuid]: a }));
+      return a;
+    } catch {
+      return null;
+    }
+  }, []);
+
+  const requestAnalysis = useCallback(
+    async (callUuid: string, force = false) => {
+      setAnalysing((prev) => ({ ...prev, [callUuid]: true }));
+      try {
+        const res = await api.requestAnalysis(callUuid, force);
+        if (res.analysis) {
+          setAnalyses((prev) => ({ ...prev, [callUuid]: res.analysis as CallAnalysis }));
+        }
+        if (!res.ok) {
+          if (res.error) pushToast('error', 'Could not analyse', res.error);
+          setAnalysing((prev) => ({ ...prev, [callUuid]: false }));
+          return;
+        }
+
+        /**
+         * The work continues on the server and normally arrives over SSE. Poll
+         * as a backstop: one dropped event used to leave "Reading the
+         * conversation…" on screen forever with no way back.
+         */
+        for (let i = 0; i < 40; i++) {
+          await new Promise((r) => setTimeout(r, 3000));
+          const latest = await api.analysis(callUuid).catch(() => null);
+          if (!latest) continue;
+          setAnalyses((prev) => ({ ...prev, [callUuid]: latest }));
+          if (latest.status === 'ready' || latest.status === 'failed') break;
+        }
+        setAnalysing((prev) => ({ ...prev, [callUuid]: false }));
+      } catch (e: any) {
+        pushToast('error', 'Could not analyse', e?.message ?? 'Request failed');
+        setAnalysing((prev) => ({ ...prev, [callUuid]: false }));
+      }
+    },
+    [pushToast],
+  );
+
   const refresh = useCallback(async () => {
     const data = await api.bootstrap(repId);
     setReps(data.reps);
@@ -121,6 +209,8 @@ export function useSoftphone() {
       try {
         const [cfg, data, w] = await Promise.all([api.plivoConfig(), api.bootstrap(), api.wireLog()]);
         setConfig(cfg);
+        api.transcriptionConfig().then(setTranscription).catch(() => undefined);
+        api.analysisConfig().then(setAnalysisConfig).catch(() => undefined);
         setReps(data.reps);
         setLeads(data.leads);
         setCalls(data.calls);
@@ -146,6 +236,16 @@ export function useSoftphone() {
   // ------------------------------------------------------- live event feed
   useEffect(() => {
     const es = new EventSource(`${API_BASE}/api/events/stream`);
+
+    /**
+     * A dropped stream used to mean the call log simply stopped updating until
+     * the page was reloaded -- a call would sit at 00:00 "Call ended" while the
+     * server already knew its duration. Re-read the snapshot on every
+     * (re)connect so a gap in the stream costs at most one refresh.
+     */
+    es.onopen = () => {
+      refresh().catch(() => undefined);
+    };
 
     es.onmessage = (ev) => {
       const event = JSON.parse(ev.data) as { type: string; payload: any };
@@ -203,6 +303,37 @@ export function useSoftphone() {
         return;
       }
 
+      if (event.type === 'transcript-ready') {
+        const { callUuid, status } = event.payload ?? {};
+        if (!callUuid) return;
+        if (status === 'ready') {
+          loadTranscript(callUuid);
+          pushToast('success', 'Transcript ready', 'The conversation is now searchable.');
+          refresh();
+        } else if (status === 'failed') {
+          pushToast('warn', 'Transcription failed', 'Open the call and retry.');
+          loadTranscript(callUuid);
+        }
+        refreshRecordings();
+        return;
+      }
+
+      if (event.type === 'analysis-ready') {
+        const { callUuid, status } = event.payload ?? {};
+        if (!callUuid) return;
+        if (status !== 'pending') {
+          setAnalysing((prev) => ({ ...prev, [callUuid]: false }));
+        }
+        if (status === 'ready') {
+          loadAnalysis(callUuid);
+          pushToast('success', 'AI analysis ready', 'The call verdict is in.');
+        } else if (status === 'failed') {
+          loadAnalysis(callUuid);
+        }
+        refresh();
+        return;
+      }
+
       if (event.type === 'crm-updated' && event.payload?.reason === 'recording') {
         pushToast('success', 'Recording ready', 'Audio attached to the call.');
         refresh();
@@ -220,22 +351,44 @@ export function useSoftphone() {
           title,
           summary,
         );
-        // In live mode the SDK may not hand us a CallUUID, so accept the one the
-        // Hangup URL reports -- otherwise the disposition popup has nothing to post.
+        /**
+         * In live mode the Browser SDK never hands us a usable CallUUID: a call
+         * starts as `callUuid: ''` and the SDK's onCallTerminated carries that
+         * empty string into wrap-up. The Hangup URL is the only place the real
+         * id appears, so adopt it here -- including when wrap-up has already
+         * been entered, which is the common case and used to leave the
+         * disposition posting to /api/calls//disposition and 404ing.
+         *
+         * Adopt it over an id the CRM has never heard of, too. An inbound call
+         * used to reach wrap-up holding Plivo's B leg UUID, which is truthy and
+         * unequal to the A leg id below, so a plain equality test rejected the
+         * correction and left the rep unable to save an outcome at all.
+         */
         const matches =
-          (cur.kind === 'in-call' || cur.kind === 'dialing') &&
-          (cur.callUuid === call.callUuid || !cur.callUuid);
+          (cur.kind === 'in-call' || cur.kind === 'dialing' || cur.kind === 'wrap-up') &&
+          (cur.callUuid === call.callUuid ||
+            !cur.callUuid ||
+            !callsRef.current.some((c) => c.callUuid === cur.callUuid));
         if (matches) {
           setPhone({
             kind: 'wrap-up',
-            lead: call.leadId ? leadsRef.current.find((l) => l.id === call.leadId) ?? null : null,
+            lead:
+              (call.leadId ? leadsRef.current.find((l) => l.id === call.leadId) : null) ??
+              (cur.kind === 'wrap-up' ? cur.lead : null),
             callUuid: call.callUuid,
-            durationSec: call.durationSec,
+            // The SDK's own timer is more accurate than a webhook that can
+            // report 0 for a call we were plainly on.
+            durationSec: call.durationSec || (cur.kind === 'wrap-up' ? cur.durationSec : 0),
             title,
             summary,
           });
         }
         refresh();
+        // The hangup webhook, the recording callback and the transcript all
+        // arrive separately over the next few seconds. One refresh catches
+        // whichever has landed; these catch the rest.
+        setTimeout(() => refresh().catch(() => undefined), 4000);
+        setTimeout(() => refresh().catch(() => undefined), 12000);
         setTimeout(refreshRecordings, 4000);
         setTimeout(refreshRecordings, 12000);
         return;
@@ -250,6 +403,32 @@ export function useSoftphone() {
 
     return () => es.close();
   }, [repId, refresh, pushToast]);
+
+  /**
+   * Belt and braces for the live feed.
+   *
+   * Returning to the tab re-reads immediately, and a slow poll covers the case
+   * where the stream is up but an event was missed. Neither is the primary
+   * path -- they exist so the UI can never sit on stale data the way it did
+   * when only SSE kept it current.
+   */
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') refresh().catch(() => undefined);
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('focus', onVisible);
+
+    const poll = setInterval(() => {
+      if (document.visibilityState === 'visible') refresh().catch(() => undefined);
+    }, 20000);
+
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('focus', onVisible);
+      clearInterval(poll);
+    };
+  }, [refresh]);
 
   // ------------------------------------------------------------- in-call timer
   useEffect(() => {
@@ -336,11 +515,28 @@ export function useSoftphone() {
       plivo.client.on('onIncomingCall', (from: string, headers: any, callInfo: any) => {
         api.clientEvent('SDK onIncomingCall', `from ${from}`, { callInfo, headers });
         const digits = String(from).replace(/\D/g, '').slice(-10);
+        const cur = phoneRef.current;
         setPhone({
           kind: 'ringing-in',
           from,
-          lead: leadsRef.current.find((l) => l.phone.replace(/\D/g, '').endsWith(digits)) ?? null,
-          callUuid: callInfo?.callUUID ?? callInfo?.callUUID ?? '',
+          lead:
+            (cur.kind === 'ringing-in' ? cur.lead : null) ??
+            leadsRef.current.find((l) => l.phone.replace(/\D/g, '').endsWith(digits)) ??
+            null,
+          /**
+           * Deliberately NOT callInfo.callUUID.
+           *
+           * On an inbound call Plivo hands the Browser SDK the *B leg* id -- the
+           * SIP leg down to this endpoint -- while the CRM keys every call by the
+           * A leg id that the Answer URL reports. Those are two different UUIDs
+           * for the one call, so storing the B leg here is what made wrap-up POST
+           * to /api/calls/<b-leg>/disposition and 404 with "Could not save the
+           * outcome".
+           *
+           * Keep the real id if the backend's incoming-call event beat us here;
+           * otherwise leave it empty so call-ended adopts the A leg id below.
+           */
+          callUuid: cur.kind === 'ringing-in' ? cur.callUuid : '',
         });
       });
       plivo.client.on('onIncomingCallCanceled', () => {
@@ -366,7 +562,12 @@ export function useSoftphone() {
         } else if (cur.kind !== 'wrap-up') {
           setPhone({ kind: 'ready' });
         }
+        // The SDK ends the call before Plivo has posted the Hangup URL, so this
+        // first read still shows the call in progress. Look again once the
+        // webhook has had time to land.
         refresh();
+        setTimeout(() => refresh().catch(() => undefined), 2500);
+        setTimeout(() => refresh().catch(() => undefined), 8000);
       });
       /**
         * The SDK calls every non-connected ending a "failure", including the
@@ -477,6 +678,37 @@ export function useSoftphone() {
     [config, repId],
   );
 
+  /** Delete a call and everything derived from it. */
+  const deleteCall = useCallback(
+    async (callUuid: string) => {
+      try {
+        const res = await api.deleteCall(callUuid);
+        setTranscripts((prev) => {
+          const next = { ...prev };
+          delete next[callUuid];
+          return next;
+        });
+        setAnalyses((prev) => {
+          const next = { ...prev };
+          delete next[callUuid];
+          return next;
+        });
+        pushToast(
+          'success',
+          'Call deleted',
+          res.audioDeleted ? 'The recording was removed too.' : 'Records removed.',
+        );
+        await refresh();
+        await refreshRecordings();
+        return true;
+      } catch (e: any) {
+        pushToast('error', 'Could not delete the call', e?.message ?? 'Request failed');
+        return false;
+      }
+    },
+    [pushToast, refresh, refreshRecordings],
+  );
+
   const answerIncoming = useCallback(async () => {
     const cur = phoneRef.current;
     if (cur.kind !== 'ringing-in') return;
@@ -528,8 +760,25 @@ export function useSoftphone() {
     async (disposition: Disposition, notes?: string) => {
       const cur = phoneRef.current;
       if (cur.kind !== 'wrap-up') return;
-      await api.setDisposition(cur.callUuid, disposition, notes);
-      pushToast('success', 'Outcome saved', disposition.replace('_', ' '));
+
+      if (!cur.callUuid) {
+        // The hangup webhook has not reached us yet, so there is no call to
+        // attach this to. Saying so beats a silent 404.
+        pushToast(
+          'warn',
+          'Still logging the call',
+          'Give it a moment and pick an outcome again.',
+        );
+        return;
+      }
+
+      try {
+        await api.setDisposition(cur.callUuid, disposition, notes);
+        pushToast('success', 'Outcome saved', disposition.replace('_', ' '));
+      } catch (e: any) {
+        pushToast('error', 'Could not save the outcome', e?.message ?? 'Request failed');
+        return;
+      }
       setPhone({ kind: 'ready' });
       setMuted(false);
       await refresh();
@@ -579,6 +828,17 @@ export function useSoftphone() {
     clearWire,
     recordings,
     refreshRecordings,
+    transcripts,
+    transcribing,
+    transcription,
+    loadTranscript,
+    requestTranscript,
+    analyses,
+    analysing,
+    analysisConfig,
+    loadAnalysis,
+    requestAnalysis,
+    deleteCall,
     toasts,
     pushToast,
     dismissToast,

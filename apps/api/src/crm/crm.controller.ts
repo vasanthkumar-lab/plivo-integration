@@ -1,8 +1,19 @@
-import { Body, Controller, Get, Param, Patch, Post, Query } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  NotFoundException,
+  Param,
+  Patch,
+  Post,
+  Query,
+} from '@nestjs/common';
 import { CrmService } from './crm.service';
 import { Disposition } from './crm.types';
 import { EventsService } from '../events/events.service';
 import { PlivoService } from '../plivo/plivo.service';
+import { PrismaService } from '../db/prisma.service';
 
 @Controller('api')
 export class CrmController {
@@ -10,6 +21,7 @@ export class CrmController {
     private readonly crm: CrmService,
     private readonly events: EventsService,
     private readonly plivo: PlivoService,
+    private readonly db: PrismaService,
   ) {}
 
   @Get('bootstrap')
@@ -21,6 +33,12 @@ export class CrmController {
       activities: this.crm.getActivities(),
       currentRepId: repId || 'u_ravi',
     };
+  }
+
+  /** Is the CRM actually on Postgres, and if not, why not? */
+  @Get('db/status')
+  dbStatus() {
+    return this.db.describe();
   }
 
   @Get('leads')
@@ -72,6 +90,9 @@ export class CrmController {
     @Body() body: { disposition: Disposition; notes?: string },
   ) {
     const call = this.crm.setDisposition(callUuid, body.disposition, body.notes);
+    // Returning 201 with a null body for a call we do not have makes the UI
+    // report "Outcome saved" when nothing was saved at all.
+    if (!call) throw new NotFoundException(`No call with UUID ${callUuid}`);
     this.events.wire({
       actor: 'browser',
       kind: 'http',
@@ -81,6 +102,36 @@ export class CrmController {
     });
     this.events.emit({ type: 'crm-updated', payload: { reason: 'disposition', callUuid } });
     return call;
+  }
+
+  /**
+   * Delete a call and everything derived from it.
+   *
+   * Also removes the audio from Plivo by default -- leaving it there would let
+   * the next recordings sync rebuild the row. Pass ?keepAudio=true to delete
+   * only our records and leave the file in the Plivo account.
+   */
+  @Delete('calls/:callUuid')
+  async deleteCall(@Param('callUuid') callUuid: string, @Query('keepAudio') keepAudio?: string) {
+    const call = this.crm.getCallByUuid(callUuid);
+    if (!call) throw new NotFoundException(`No call with UUID ${callUuid}`);
+
+    let audioDeleted = false;
+    if (keepAudio !== 'true' && call.recordingUrl) {
+      audioDeleted = await this.plivo.deleteRecording(call.recordingUrl);
+    }
+
+    await this.crm.deleteCall(callUuid);
+
+    this.events.wire({
+      actor: 'backend',
+      kind: 'note',
+      label: 'Call deleted',
+      detail: `${callUuid.slice(0, 8)} removed${audioDeleted ? ' with its recording' : ''}`,
+    });
+    this.events.emit({ type: 'crm-updated', payload: { reason: 'call-deleted', callUuid } });
+
+    return { ok: true, callUuid, audioDeleted };
   }
 
   @Patch('reps/:id/presence')

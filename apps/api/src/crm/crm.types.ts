@@ -52,6 +52,10 @@ export interface CallLog {
   endedBy: EndedBy | null;
   /** Plivo's own words, e.g. "Normal Hangup" / "ORIGINATOR_CANCEL". Kept for the Inspector. */
   endReason: string | null;
+  /** Where this call's Deepgram transcript has got to. */
+  transcriptStatus: 'none' | 'pending' | 'ready' | 'failed';
+  /** Where Gemini's verdict on the conversation has got to. */
+  analysisStatus: 'none' | 'pending' | 'ready' | 'failed';
 }
 
 export interface Activity {

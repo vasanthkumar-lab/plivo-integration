@@ -13,7 +13,9 @@
     "build": "npm --workspace apps/api run build && npm --workspace apps/web run build",
     "start": "concurrently -n api,web -c cyan,magenta \"npm --workspace apps/api run start\" \"npm --workspace apps/web run start\"",
     "plivo:setup": "node apps/api/scripts/setup-plivo.mjs",
-    "clean": "node -e \"const fs=require(\"fs\");[\"apps/web/.next\",\"apps/web/.next-dev\",\"apps/api/dist\"].forEach(d=>fs.rmSync(d,{recursive:true,force:true}));console.log(\"cleaned\")\""
+    "clean": "node -e \"const fs=require(\"fs\");[\"apps/web/.next\",\"apps/web/.next-dev\",\"apps/api/dist\"].forEach(d=>fs.rmSync(d,{recursive:true,force:true}));console.log(\"cleaned\")\"",
+    "db:studio": "npm --workspace apps/api run db:studio",
+    "db:deploy": "npm --workspace apps/api run db:deploy"
   },
   "devDependencies": {
     "concurrently": "^9.1.2"

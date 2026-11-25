@@ -5,6 +5,8 @@ import { PlivoConfig } from './plivo.config';
 import { CrmService } from '../crm/crm.service';
 import { partyFromDialSource, statusFromCallStatus, statusFromCause, titleForOutcome, describeOutcome } from '../crm/call-outcome';
 import { EventsService } from '../events/events.service';
+import { TranscriptionService } from '../transcription/transcription.service';
+import { DeepgramConfig } from '../transcription/deepgram.config';
 
 @Injectable()
 export class PlivoService {
@@ -14,7 +16,19 @@ export class PlivoService {
     private readonly config: PlivoConfig,
     private readonly crm: CrmService,
     private readonly events: EventsService,
+    private readonly transcription: TranscriptionService,
+    private readonly deepgram: DeepgramConfig,
   ) {}
+
+  /**
+   * Kick off a transcript once audio exists. Fire-and-forget on purpose: a
+   * webhook handler must answer Plivo immediately, and a 30-minute call can
+   * take a while to transcribe.
+   */
+  queueTranscription(callUuid: string) {
+    if (!this.deepgram.enabled || !this.deepgram.autoTranscribe) return;
+    void this.transcription.transcribeCall(callUuid).catch(() => undefined);
+  }
 
   // ------------------------------------------------------------------
   // Rep login: mint a short-lived JWT for this rep's endpoint.
@@ -127,6 +141,21 @@ export class PlivoService {
     if (!callUuid || this.recording.has(callUuid)) return;
     this.recording.add(callUuid);
 
+    // Stereo first: it is what makes transcript speaker labels provable.
+    // If Plivo will not do it, mono is far better than no recording at all.
+    const wanted = this.config.recordChannels;
+    const ok = await this.postRecord(callUuid, wanted);
+    if (!ok && wanted !== 'mono') {
+      this.log.warn(`${wanted} recording refused - retrying in mono`);
+      const fellBack = await this.postRecord(callUuid, 'mono');
+      if (!fellBack) this.recording.delete(callUuid);
+      return;
+    }
+    if (!ok) this.recording.delete(callUuid);
+  }
+
+  /** One attempt at POST /Call/{uuid}/Record/. Returns false so the caller can retry. */
+  private async postRecord(callUuid: string, channels: 'mono' | 'stereo'): Promise<boolean> {
     const url = `https://api.plivo.com/v1/Account/${this.config.authId}/Call/${callUuid}/Record/`;
     try {
       const res = await fetch(url, {
@@ -137,6 +166,9 @@ export class PlivoService {
         },
         body: JSON.stringify({
           file_format: 'mp3',
+          // Plivo's own name for this. It accepts only "mono" or "stereo" and
+          // ignores anything else silently, returning 200 either way.
+          record_channel_type: channels,
           // Without this, Plivo stops recording after 60 seconds.
           time_limit: this.config.recordMaxSeconds,
           callback_url: `${this.config.publicUrl}/plivo/recording`,
@@ -145,27 +177,27 @@ export class PlivoService {
       });
 
       if (!res.ok) {
-        this.recording.delete(callUuid);
         const text = await res.text();
-        this.log.warn(`record start failed ${res.status}: ${text.slice(0, 200)}`);
+        this.log.warn(`record start failed ${res.status} (${channels}): ${text.slice(0, 200)}`);
         this.events.wire({
           actor: 'backend',
           kind: 'note',
           label: `Recording could not start (${res.status})`,
-          detail: text.slice(0, 120),
+          detail: `${channels} - ${text.slice(0, 110)}`,
         });
-        return;
+        return false;
       }
 
       this.events.wire({
         actor: 'backend',
         kind: 'http',
         label: 'POST /Call/{uuid}/Record/',
-        detail: 'recording started for this call',
+        detail: `recording started - ${channels}`,
       });
+      return true;
     } catch (err) {
-      this.recording.delete(callUuid);
       this.log.error(`record start error: ${(err as Error).message}`);
+      return false;
     }
   }
 
@@ -223,6 +255,7 @@ export class PlivoService {
         }
 
         this.crm.attachRecording(callUuid, url, Number(rec.recording_duration ?? 0));
+        this.queueTranscription(callUuid);
         added++;
       }
 
@@ -266,6 +299,44 @@ export class PlivoService {
       return res.ok ? ((await res.json()) as Record<string, any>) : null;
     } catch {
       return null;
+    }
+  }
+
+  /**
+   * Delete a recording at Plivo.
+   *
+   * Without this, syncRecordings() finds the audio still sitting in the account
+   * on its next pass and rebuilds the very call row the user just deleted.
+   * The id is the last path segment of the media URL.
+   */
+  async deleteRecording(recordingUrl: string | null): Promise<boolean> {
+    if (!recordingUrl || !this.config.live) return false;
+
+    const id = recordingUrl.split('/').pop()?.replace(/.[a-z0-9]+$/i, '') ?? '';
+    if (!/^[A-Za-z0-9-]{8,}$/.test(id)) {
+      this.log.warn(`could not read a recording id from ${recordingUrl}`);
+      return false;
+    }
+
+    try {
+      const res = await fetch(
+        `https://api.plivo.com/v1/Account/${this.config.authId}/Recording/${id}/`,
+        {
+          method: 'DELETE',
+          headers: {
+            Authorization: `Basic ${Buffer.from(`${this.config.authId}:${this.config.authToken}`).toString('base64')}`,
+          },
+        },
+      );
+      // 404 means it is already gone, which is the outcome we wanted anyway.
+      if (!res.ok && res.status !== 404) {
+        this.log.warn(`Plivo refused to delete recording ${id}: ${res.status}`);
+        return false;
+      }
+      return true;
+    } catch (err) {
+      this.log.error(`recording delete failed: ${(err as Error).message}`);
+      return false;
     }
   }
 
